@@ -381,13 +381,24 @@ def shell():
     global running
     
     while running:
-        if not client_socket:
-            time.sleep(1)
-            continue
-            
         try:
-            prompt = input_prompt()
-            cmd_input = input(prompt)
+            if not client_socket:
+                time.sleep(1)
+                continue
+                
+            try:
+                prompt = input_prompt()
+                cmd_input = input(prompt)
+            except EOFError:
+                # EOF terjadi ketika input ditutup, misal di background process
+                logger.debug("EOFError in shell input, sleeping...")
+                time.sleep(1)
+                continue
+            except OSError as e:
+                # Error pada stdin, mungkin karena running di background
+                logger.debug(f"OSError in shell input: {e}")
+                time.sleep(1)
+                continue
             
             if not cmd_input:
                 continue
@@ -460,11 +471,10 @@ def shell():
                 else:
                     print("Unknown command. Type 'help' for a list.")
                     
-        except (EOFError, KeyboardInterrupt):
-            running = False
-            break
         except Exception as e:
-            print(f"\n{Fore.RED}[ERROR] Shell crashed: {e}")
+            logger.error(f"Unhandled error in shell thread: {e}")
+            time.sleep(1)
+            continue
 
 def main():
     """Main function"""
@@ -490,7 +500,13 @@ def main():
         else:
             print(f"[!] WARNING: No server2 URL configured. Set SERVER2_URL env variable to enable web interface.")
         
-        threading.Thread(target=shell, daemon=True).start()
+        # Start shell thread dengan try-except
+        try:
+            shell_thread = threading.Thread(target=shell, daemon=True)
+            shell_thread.start()
+            logger.info("Shell thread started")
+        except Exception as e:
+            logger.error(f"Failed to start shell thread: {e}")
         
         while running:
             if not client_socket:
@@ -501,13 +517,17 @@ def main():
                     client_socket, client_address = conn, addr
                     
                     print(f"\n{Fore.GREEN}[+] Device connected from {addr[0]}:{addr[1]}")
+                    logger.info(f"Device connected from {addr[0]}:{addr[1]}")
+                    
                     forward_to_server2('CONNECTION', {
                         'status': 'connected',
                         'address': addr[0],
                         'port': addr[1]
                     })
                     
-                    threading.Thread(target=client_listener, args=(conn,), daemon=True).start()
+                    listener_thread = threading.Thread(target=client_listener, args=(conn,), daemon=True)
+                    listener_thread.start()
+                    logger.info("Listener thread started")
                     
                 except socket.timeout:
                     continue
@@ -516,12 +536,20 @@ def main():
                     time.sleep(1)
             else:
                 time.sleep(0.1)
-            
+        
     except Exception as e:
         logger.error(f"Server error: {e}")
     finally:
+        logger.info("Closing server socket...")
         server_socket.close()
         print("Server shut down.")
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\nServer stopped by user")
+        sys.exit(0)
+    except Exception as e:
+        logger.error(f"Fatal error: {e}")
+        sys.exit(1)
