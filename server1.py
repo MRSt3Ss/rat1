@@ -64,10 +64,10 @@ def tcp_listener():
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     
-    # TCP Tunnel Railway di port 9090
-    server.bind(('0.0.0.0', 9090))
+    # TCP Tunnel Railway di port 2224
+    server.bind(('0.0.0.0', 2224))
     server.listen(1)
-    add_log("[*] TCP Server listening on port 9090")
+    add_log("[*] TCP Server listening on port 2224")
 
     while running:
         try:
